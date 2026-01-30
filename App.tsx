@@ -36,37 +36,6 @@ const SidebarItem: React.FC<{ icon: any; label: string; active: boolean; onClick
   </button>
 );
 
-// --- TOOL DEFINITIONS (Simplified for Stability) ---
-const createCourseTool: any = {
-  name: 'create_course',
-  description: 'Creates a new academic course/subject in the system.',
-  parameters: {
-    type: 'OBJECT',
-    properties: {
-      name: { type: 'STRING', description: 'The name of the course (e.g. Calculus)' },
-      credits: { type: 'NUMBER', description: 'Number of credits (default 3)' },
-      semester: { type: 'NUMBER', description: 'Semester number (1-10)' }
-    },
-    required: ['name']
-  }
-};
-
-const addGradeTool: any = {
-  name: 'add_grade',
-  description: 'Adds a grade to a specific course. Can add a main cut grade or a sub-activity grade.',
-  parameters: {
-    type: 'OBJECT',
-    properties: {
-      course_name: { type: 'STRING', description: 'Name of the course to find (fuzzy match)' },
-      cut_name: { type: 'STRING', description: 'Name of the cut (e.g. "Corte 1", "Parcial", "Final")' },
-      grade: { type: 'NUMBER', description: 'The grade value (e.g. 4.5)' },
-      activity_name: { type: 'STRING', description: 'Name of the sub-activity (e.g. "Quiz 1", "Taller"). Optional. Use this for detailed grading.' },
-      weight: { type: 'NUMBER', description: 'Weight percentage (0-100). Optional.' }
-    },
-    required: ['course_name', 'cut_name', 'grade']
-  }
-};
-
 interface Notification {
   id: number;
   type: 'alert' | 'info' | 'success';
@@ -114,11 +83,8 @@ const MS_PER_DAY = 24 * 60 * 60 * 1000;
 
 // Helper to safely get API key in component (Redundant but kept for safety)
 const getClientApiKey = () => {
-    if (typeof process !== 'undefined' && process.env && process.env.API_KEY) return process.env.API_KEY;
-    if (import.meta.env && import.meta.env.VITE_API_KEY) return import.meta.env.VITE_API_KEY;
-    // LLAVE MAESTRA DE RESPALDO (SYNC WITH GEMINI.TS)
-    // Key: AIzaSyDuFLG60h_jvDhkW6gThZwC1i4i8I2WPjk
-    return "AIzaSyDuFLG60h_jvDhkW6gThZwC1i4i8I2WPjk";
+    // HARDCODED KEY - SOURCE OF TRUTH
+    return "AIzaSyDiSXYLe-zqKCqtfUSPAZJ9qOzTkK8JsCk";
 };
 
 export default function App() {

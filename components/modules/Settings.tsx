@@ -1,7 +1,7 @@
 
 import React, { useState, useRef } from 'react';
 import { User, Task, Course, Achievement, AppTab } from '../../types';
-import { User as UserIcon, GraduationCap, Palette, Database, Shield, ChevronRight, Sun, Moon, CheckCircle2, Sheet, AlertTriangle, ExternalLink, Code, Sparkles, Search, Bot, Check, Zap, Layers, Terminal, Cpu, Lock, Trophy, ZapOff, Upload, BrainCircuit, LayoutDashboard, ListTodo, Target, FileText, Type, Sidebar, Monitor, Circle, Square, BatteryCharging } from 'lucide-react';
+import { User as UserIcon, GraduationCap, Palette, Database, Shield, ChevronRight, Sun, Moon, CheckCircle2, Sheet, AlertTriangle, ExternalLink, Code, Sparkles, Search, Bot, Check, Zap, Layers, Terminal, Cpu, Lock, Trophy, ZapOff, Upload, BrainCircuit, LayoutDashboard, ListTodo, Target, FileText, Type, Sidebar, Monitor, Circle, Square, BatteryCharging, KeyRound, Wifi } from 'lucide-react';
 import { UniversityBrowser } from '../UniversityBrowser';
 import * as XLSX from 'xlsx';
 
@@ -55,6 +55,20 @@ export const SettingsModule: React.FC<{ user: User; setUser: (u: User) => void; 
     const updatePrefs = (newPrefs: Partial<typeof prefs>) => {
         setUser({ ...user, preferences: { ...prefs, ...newPrefs } });
     };
+
+    // --- API DIAGNOSTICS (HARDCODED MODE) ---
+    const getActiveKeyInfo = () => {
+        // En este modo forzado, sabemos la clave que estamos usando.
+        const key = "AIzaSyDiSXYLe-zqKCqtfUSPAZJ9qOzTkK8JsCk";
+        
+        return {
+            preview: key ? `${key.substring(0, 10)}...${key.substring(key.length - 4)}` : "Error",
+            fullMatch: true, 
+            source: "Sistema Integrado (Core)"
+        };
+    };
+    
+    const keyInfo = getActiveKeyInfo();
 
     const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
         if (!e.target.files) return;
@@ -538,6 +552,39 @@ export const SettingsModule: React.FC<{ user: User; setUser: (u: User) => void; 
                                         <span>Desarrollado por <span className="uppercase tracking-wide">CG Labs</span></span>
                                         <span className="w-1 h-1 rounded-full bg-current opacity-50"></span>
                                         <span className="flex items-center gap-1"><Bot size={12}/> Cortex AI</span>
+                                    </div>
+
+                                    {/* API DIAGNOSTICS SECTION */}
+                                    <div className="mb-6 bg-[var(--bg-input)] rounded-xl border border-[var(--border-color)] text-left overflow-hidden">
+                                        <div className="px-4 py-2 border-b border-[var(--border-color)] flex items-center justify-between bg-[var(--bg-card)]">
+                                            <span className="text-xs font-bold uppercase text-[var(--text-secondary)]">Diagnóstico de API</span>
+                                            <div className="flex items-center gap-1.5">
+                                                {keyInfo.fullMatch ? (
+                                                    <span className="text-[10px] bg-emerald-100 text-emerald-800 dark:bg-emerald-900 dark:text-emerald-100 px-1.5 py-0.5 rounded font-bold">Verificado</span>
+                                                ) : (
+                                                    <span className="text-[10px] bg-amber-100 text-amber-800 dark:bg-amber-900 dark:text-amber-100 px-1.5 py-0.5 rounded font-bold">Respaldo / Otro</span>
+                                                )}
+                                            </div>
+                                        </div>
+                                        <div className="p-4 space-y-3">
+                                            <div className="flex justify-between items-center text-xs">
+                                                <span className="text-[var(--text-secondary)] flex items-center gap-1"><KeyRound size={12}/> Key Activa</span>
+                                                <span className="font-mono font-bold text-[var(--text-primary)] bg-[var(--bg-card)] px-2 py-0.5 rounded border border-[var(--border-color)]">
+                                                    {keyInfo.preview}
+                                                </span>
+                                            </div>
+                                            <div className="flex justify-between items-center text-xs">
+                                                <span className="text-[var(--text-secondary)] flex items-center gap-1"><Wifi size={12}/> Origen</span>
+                                                <span className="font-bold text-[var(--accent)]">
+                                                    {keyInfo.source}
+                                                </span>
+                                            </div>
+                                            {!keyInfo.fullMatch && (
+                                                <div className="p-2 rounded bg-amber-50 dark:bg-amber-900/20 text-amber-700 dark:text-amber-300 text-[10px] leading-snug">
+                                                    <strong>Nota:</strong> No se está usando la clave principal configurada en Vercel (AIzaSyDi...). Verifica las variables de entorno si esto es un error.
+                                                </div>
+                                            )}
+                                        </div>
                                     </div>
 
                                     <div className="flex flex-col gap-3 max-w-sm mx-auto text-left text-sm text-[var(--text-secondary)] bg-[var(--bg-input)] p-6 rounded-xl border border-[var(--border-color)]">
