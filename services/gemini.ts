@@ -1,168 +1,113 @@
 
-import { GoogleGenAI, GenerateContentResponse } from "@google/genai";
+import { GoogleGenAI } from "@google/genai";
 
-// --- PROTOCOLO HYDRA: LISTA MAESTRA DE CLAVES ---
-const RAW_KEYS = [
-    // Prioridad 1: Variables de Entorno
-    import.meta.env?.VITE_API_KEY,
-    (typeof process !== 'undefined' && process.env ? process.env.API_KEY : undefined),
-    
-    // Prioridad 2: Nuevas Claves (Alta Disponibilidad)
-    "AIzaSyDz1XHDlFzscEe1935chxppQbXl_sm0LR8",
-    "AIzaSyDJtWVR_u-fseW77yf3mbqc6lAf1juJpDk",
-    
-    // Prioridad 3: Respaldo
-    "AIzaSyAoJCjcjZxc9rla-I-BHjmmg72Ws4NIlKw",
-    "AIzaSyD_piyBZMeCnE85O96tDgemeRatG3UyctI", 
-    "AIzaSyDJh9lNsu-G83rP1fWWylpH48T0WjJAhA8",
-    "AIzaSyA6ad4UWDIp4Len_uT2ZjoZt0zChFCmO2w"
-];
+// --- CORTEX AI CONFIGURATION ---
 
-// Filtramos claves duplicadas o vacías
-const API_KEYS = Array.from(new Set(
-    RAW_KEYS.filter(k => k && typeof k === 'string' && k.length > 20 && !k.includes("REPLACE"))
-)) as string[];
-
-const MODEL_MAP = {
-    'flash': 'gemini-3-flash-preview',
-    'pro': 'gemini-3-pro-preview'
-};
-
-// Variable para rastrear si estamos en modo emergencia total
-let IS_OFFLINE_MODE = false;
-
-// --- MOTOR DE ROTACIÓN (FAILOVER SYSTEM) ---
-// Ejecuta una operación probando claves secuencialmente si fallan
-async function withKeyRotation<T>(
-    operation: (ai: GoogleGenAI) => Promise<T>
-): Promise<T> {
-    if (IS_OFFLINE_MODE) throw new Error("Offline Mode Active");
-
-    let lastError: any;
-
-    for (let i = 0; i < API_KEYS.length; i++) {
-        const apiKey = API_KEYS[i];
-        try {
-            const ai = new GoogleGenAI({ apiKey });
-            // Si la operación es exitosa, retornamos inmediatamente
-            return await operation(ai);
-        } catch (error: any) {
-            console.warn(`⚠️ Clave ${i + 1}/${API_KEYS.length} falló:`, error.message || error);
-            lastError = error;
-            // Continuamos al siguiente loop (siguiente clave)
-        }
+const getApiKey = (): string => {
+    // 1. Intentar obtener de la inyección de compilación (Vite Define / Vercel)
+    if (typeof process !== 'undefined' && process.env && process.env.API_KEY) {
+        return process.env.API_KEY;
     }
-
-    // Si llegamos aquí, todas las claves fallaron
-    throw lastError || new Error("Todas las API Keys fallaron.");
-}
-
-// --- MOCK ENGINE (RESPUESTAS PREDEFINIDAS) ---
-const MOCK_RESPONSES: Record<string, string> = {
-    'default': "## Sistema Offline 🛡️\n\nNo he podido establecer enlace con los servidores de Google ni siquiera rotando las credenciales de seguridad.\n\nEstoy operando con capacidad limitada. Puedo ayudarte a gestionar tareas localmente.",
-    'math': "Modo Offline: Para resolver esto, recuerda identificar las variables y aplicar la fórmula correspondiente. No puedo calcularlo en tiempo real ahora mismo.",
-    'strategy': "## Estrategia General (Offline)\n\n1. **Identifica el corte con mayor peso** y enfócate ahí.\n2. **Entrega todo**: Los ceros bajan mucho el promedio.\n3. **Asistencia**: No pierdas la materia por fallas.",
-    'university': "## Información Offline\n\nNo tengo acceso a la red externa. Consulta directamente la página web de tu universidad para fechas exactas."
+    // 2. Intentar obtener de variables de entorno estándar de Vite
+    if (import.meta.env && import.meta.env.VITE_API_KEY) {
+        return import.meta.env.VITE_API_KEY;
+    }
+    
+    console.warn("⚠️ Cortex: No API Key detected. AI features will be disabled.");
+    return "";
 };
 
-const getMockResponse = (prompt: string): string => {
-    const p = prompt.toLowerCase();
-    if (p.includes('matematica') || p.includes('calculo')) return MOCK_RESPONSES.math;
-    if (p.includes('estrategia') || p.includes('nota')) return MOCK_RESPONSES.strategy;
-    if (p.includes('investiga')) return MOCK_RESPONSES.university;
-    return MOCK_RESPONSES.default;
+const API_KEY = getApiKey();
+
+// --- MAPA DE MODELOS (GEMINI 3.0) ---
+const MODELS = {
+    standard: 'gemini-3-flash-preview',      
+    premium: 'gemini-3-pro-preview',
 };
 
-/**
- * Validates connection trying ALL keys.
- */
+// --- PUBLIC EXPORTS ---
+
 export const checkAiConnection = async (): Promise<'connected' | 'offline'> => {
+    if (!API_KEY) return 'offline';
     try {
-        if (API_KEYS.length === 0) throw new Error("No keys available");
-        
-        await withKeyRotation(async (ai) => {
-            await ai.models.generateContent({
-                model: 'gemini-3-flash-preview',
-                contents: 'ping',
-            });
+        const ai = new GoogleGenAI({ apiKey: API_KEY });
+        // Ping rápido (1 token)
+        await ai.models.generateContent({
+            model: MODELS.standard,
+            contents: 'ping',
+            config: { maxOutputTokens: 1 }
         });
-        
-        IS_OFFLINE_MODE = false;
-        console.log("✅ Conexión establecida (Hydra Protocol)");
         return 'connected';
     } catch (error) {
-        console.error("❌ Fallo Crítico: Todas las claves fallaron. Activando Modo Offline.", error);
-        IS_OFFLINE_MODE = true;
+        console.error("❌ Cortex Connection Check Failed:", error);
         return 'offline';
     }
 };
 
-/**
- * Generates text response using Key Rotation
- */
 export const generateText = async (
     prompt: string, 
     systemInstruction?: string,
     modelType: 'flash' | 'pro' = 'flash'
 ): Promise<string> => {
-  try {
-    const modelName = MODEL_MAP[modelType];
+    if (!API_KEY) return getMockResponse(prompt);
 
-    const response = await withKeyRotation<GenerateContentResponse>(async (ai) => {
-        return await ai.models.generateContent({
-            model: modelName,
+    try {
+        const ai = new GoogleGenAI({ apiKey: API_KEY });
+        const targetModel = modelType === 'pro' ? MODELS.premium : MODELS.standard;
+
+        const result = await ai.models.generateContent({
+            model: targetModel,
             contents: prompt,
-            config: {
+            config: { 
                 systemInstruction: systemInstruction,
-                temperature: modelType === 'pro' ? 0.4 : 0.7, 
+                temperature: 0.7 
             }
         });
-    });
 
-    return response.text || "Respuesta vacía.";
-  } catch (error) {
-    console.warn("AI Generation Failed -> Using Mock");
-    return getMockResponse(prompt);
-  }
+        return result.text || "";
+
+    } catch (error) {
+        console.error("AI Generation Error:", error);
+        return getMockResponse(prompt);
+    }
 };
 
-/**
- * RAG Chat functionality
- */
 export const interactWithDocument = async (
     docContent: string,
     history: {role: 'user'|'model', text: string}[],
     userQuery: string,
     modelType: 'flash' | 'pro' = 'flash'
 ): Promise<string> => {
-    try {
-        const modelName = MODEL_MAP[modelType];
-        const systemInstruction = `Eres NEXUS. Responde basándote ÚNICAMENTE en el siguiente documento:\n---\n${docContent.substring(0, 90000)}\n---`;
+    if (!API_KEY) return "Modo Offline: Configura la API Key para usar esta función.";
 
+    try {
+        const ai = new GoogleGenAI({ apiKey: API_KEY });
+        const targetModel = modelType === 'pro' ? MODELS.premium : MODELS.standard;
+        const instruction = `Eres NEXUS. Responde basándote ÚNICAMENTE en este contexto:\n---\n${docContent.substring(0, 30000)}\n---`;
+
+        // Formato para @google/genai SDK
         const chatHistory = history.map(h => ({
             role: h.role,
             parts: [{ text: h.text }]
         }));
 
-        const response = await withKeyRotation<GenerateContentResponse>(async (ai) => {
-            const chat = ai.chats.create({
-                model: modelName,
-                config: { systemInstruction, temperature: 0.3 },
-                history: chatHistory
-            });
-            return await chat.sendMessage({ message: userQuery });
+        const chat = ai.chats.create({
+            model: targetModel,
+            history: chatHistory,
+            config: { 
+                systemInstruction: instruction,
+                temperature: 0.3
+            }
         });
 
-        return response.text || "Sin respuesta.";
+        const result = await chat.sendMessage({ message: userQuery });
+        return result.text || "";
 
     } catch (error) {
-        return "Modo Offline: No puedo analizar el documento en este momento.";
+        return "Error analizando documento. Verifica tu conexión.";
     }
 };
 
-/**
- * Generates a strategic academic advice
- */
 export const generateGradeStrategy = async (
     courseName: string, 
     currentGrade: number, 
@@ -171,68 +116,36 @@ export const generateGradeStrategy = async (
     remainingWeight: number,
     modelType: 'flash' | 'pro' = 'flash'
 ): Promise<string> => {
-    try {
-        const modelName = MODEL_MAP[modelType];
-        const prompt = `Materia: ${courseName}. Nota Actual: ${currentGrade.toFixed(2)}. Meta: ${targetGrade.toFixed(1)}. Necesita: ${neededGrade.toFixed(2)} en el ${remainingWeight}% restante. Dame 3 consejos tácticos breves en Markdown.`;
-
-        const response = await withKeyRotation<GenerateContentResponse>(async (ai) => {
-            return await ai.models.generateContent({
-                model: modelName, 
-                contents: prompt,
-                config: { temperature: 0.4 }
-            });
-        });
-
-        return response.text || "Estrategia no generada.";
-    } catch (error) {
-        return MOCK_RESPONSES.strategy;
-    }
+    const prompt = `Materia: ${courseName}. Nota Actual: ${currentGrade.toFixed(2)}. Meta: ${targetGrade.toFixed(1)}. Necesita: ${neededGrade.toFixed(2)} en el ${remainingWeight}% restante. Dame 3 consejos breves.`;
+    return await generateText(prompt, undefined, modelType);
 };
 
-/**
- * Researches a specific university
- */
 export const researchUniversity = async (university: string, query: string): Promise<{ text: string, foundDates?: { text: string, date: string }[] }> => {
-    try {
-        const model = 'gemini-3-flash-preview'; 
-        const prompt = `Investiga sobre: ${university}. Consulta: "${query}".
-        Si encuentras fechas específicas, extraelas al final en formato JSON puro:
-        \`\`\`json
-        [{"text": "Evento", "date": "YYYY-MM-DD"}]
-        \`\`\`
-        Prioriza información oficial.`;
+    const prompt = `Investiga sobre: ${university}. Consulta: "${query}". Si hay fechas, extráelas en JSON al final: \`\`\`json [{"text": "Evento", "date": "YYYY-MM-DD"}] \`\`\``;
+    const responseText = await generateText(prompt);
+    
+    const jsonMatch = responseText.match(/```json([\s\S]*?)```/);
+    let foundDates = undefined;
+    let cleanText = responseText;
 
-        const response = await withKeyRotation<GenerateContentResponse>(async (ai) => {
-            return await ai.models.generateContent({
-                model: model, 
-                contents: prompt,
-                config: {
-                    tools: [{ googleSearch: {} }],
-                    temperature: 0.5
-                }
-            });
-        }); 
-
-        const fullText = response.text || "Sin datos.";
-        
-        const jsonMatch = fullText.match(/```json([\s\S]*?)```/);
-        let foundDates = undefined;
-        let cleanText = fullText;
-
-        if (jsonMatch && jsonMatch[1]) {
-            try {
-                foundDates = JSON.parse(jsonMatch[1]);
-                cleanText = fullText.replace(jsonMatch[0], '').trim();
-            } catch (e) { console.error(e); }
-        }
-
-        return { text: cleanText, foundDates };
-
-    } catch (error) {
-        console.warn("Research Error -> Using Mock");
-        return { 
-            text: MOCK_RESPONSES.university,
-            foundDates: []
-        };
+    if (jsonMatch && jsonMatch[1]) {
+        try {
+            foundDates = JSON.parse(jsonMatch[1]);
+            cleanText = responseText.replace(jsonMatch[0], '').trim();
+        } catch (e) {}
     }
+
+    return { text: cleanText, foundDates };
+};
+
+// --- RESPUESTAS DE EMERGENCIA (MOCK) ---
+const MOCK_RESPONSES: Record<string, string> = {
+    'default': "## Sistema Offline 🛡️\n\nNo se detectó una API Key válida. Por favor configura VITE_API_KEY en Vercel.",
+    'strategy': "## Estrategia Offline\n\n1. Enfócate en los trabajos de mayor peso.\n2. Habla con el profesor.\n3. No faltes a clases.",
+    'university': "Modo Offline: Consulta la página oficial de la universidad."
+};
+
+const getMockResponse = (prompt: string): string => {
+    if (prompt.includes('Investiga')) return MOCK_RESPONSES.university;
+    return MOCK_RESPONSES.default;
 };
