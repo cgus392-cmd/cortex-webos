@@ -1,9 +1,13 @@
 
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import { User, Task, Course, Achievement, AppTab } from '../../types';
-import { User as UserIcon, GraduationCap, Palette, Database, Shield, ChevronRight, Sun, Moon, CheckCircle2, Sheet, AlertTriangle, ExternalLink, Code, Sparkles, Search, Bot, Check, Zap, Layers, Terminal, Cpu, Lock, Trophy, ZapOff, Upload, BrainCircuit, LayoutDashboard, ListTodo, Target, FileText, Type, Sidebar, Monitor, Circle, Square, BatteryCharging, KeyRound, Wifi } from 'lucide-react';
+import { User as UserIcon, GraduationCap, Palette, Database, Shield, ChevronRight, Sun, Moon, CheckCircle2, Sheet, AlertTriangle, ExternalLink, Code, Sparkles, Search, Bot, Check, Zap, Layers, Terminal, Cpu, Lock, Trophy, Upload, BrainCircuit, LayoutDashboard, ListTodo, Target, FileText, Type, Sidebar, Monitor, Circle, Square, BatteryCharging, KeyRound, Wifi, Gauge, Smartphone, RefreshCcw, UserX, Trash2, LogOut, X, Loader2, Fingerprint, Camera, Building2, Link2, Image as ImageIcon, Globe, MousePointerClick } from 'lucide-react';
 import { UniversityBrowser } from '../UniversityBrowser';
+import { CortexAvatar } from '../CortexAvatar';
 import * as XLSX from 'xlsx';
+import { auth, db, doc, deleteDoc, updateDoc, signOut, googleProvider } from '../../services/firebase';
+import { deleteUser, reauthenticateWithPopup } from 'firebase/auth';
+import { searchUniversityDatabase, searchUniversityWithAI, getUniversityLogo, UniversityMatch } from '../../services/universityEngine';
 
 // --- ACHIEVEMENTS DEFINITION ---
 export const ACHIEVEMENTS: Achievement[] = [
@@ -45,31 +49,137 @@ export const ACHIEVEMENTS: Achievement[] = [
     }
 ];
 
-export const SettingsModule: React.FC<{ user: User; setUser: (u: User) => void; onImport: (d: any) => void; exportData: () => void; onAddTasks: (tasks: Task[]) => void }> = ({ user, setUser, onImport, exportData, onAddTasks }) => {
-    const [activeSection, setActiveSection] = useState<'profile' | 'academic' | 'ai' | 'appearance' | 'data' | 'info'>('appearance');
+export const SettingsModule: React.FC<{ 
+    user: User; 
+    setUser: (u: User) => void; 
+    onImport: (d: any) => void; 
+    exportData: () => void; 
+    onAddTasks: (tasks: Task[]) => void;
+    onRunBenchmark: () => void;
+}> = ({ user, setUser, onImport, exportData, onAddTasks, onRunBenchmark }) => {
+    const [activeSection, setActiveSection] = useState<'profile' | 'academic' | 'ai' | 'appearance' | 'data' | 'info'>('profile');
     const [showBrowser, setShowBrowser] = useState(false);
+    
+    // --- IDENTITY STATES ---
+    const [tempAvatarFile, setTempAvatarFile] = useState<string | null>(null);
+    
+    // Search State
+    const [searchTerm, setSearchTerm] = useState(user.university || '');
+    const [uniResults, setUniResults] = useState<UniversityMatch[]>([]);
+    const [showUniResults, setShowUniResults] = useState(false);
+    const [manualUrl, setManualUrl] = useState('');
+    const [isValidatingUrl, setIsValidatingUrl] = useState(false);
+    const [isAiSearching, setIsAiSearching] = useState(false);
+    
+    const avatarInputRef = useRef<HTMLInputElement>(null);
+
+    // --- SECURITY MODAL STATE ---
+    const [securityModal, setSecurityModal] = useState<{
+        isOpen: boolean;
+        type: 'reset' | 'delete' | null;
+        step: 'confirm' | 'processing' | 'success' | 'error';
+        log: string[];
+    }>({ isOpen: false, type: null, step: 'confirm', log: [] });
+    const [confirmationInput, setConfirmationInput] = useState('');
+
     const fileInputRef = useRef<HTMLInputElement>(null);
 
     // Ensure preferences exist
-    const prefs = user.preferences || { nebulaIntensity: 0.25, glassStrength: 'high', fontStyle: 'modern', startTab: 'dashboard', reducedMotion: false, enableTexture: false, interfaceRoundness: 'modern', sidebarPosition: 'left', lowPowerMode: false };
+    const prefs = user.preferences || { nebulaIntensity: 0.25, glassStrength: 'high', fontStyle: 'modern', startTab: 'dashboard', reducedMotion: false, enableTexture: false, interfaceRoundness: 'modern', sidebarPosition: 'left', lowPowerMode: false, compactMode: false };
     const updatePrefs = (newPrefs: Partial<typeof prefs>) => {
         setUser({ ...user, preferences: { ...prefs, ...newPrefs } });
     };
 
-    // --- API DIAGNOSTICS (HARDCODED MODE) ---
+    // --- API DIAGNOSTICS ---
     const getActiveKeyInfo = () => {
-        // En este modo forzado, sabemos la clave que estamos usando.
-        const key = "AIzaSyDiSXYLe-zqKCqtfUSPAZJ9qOzTkK8JsCk";
-        
+        const key = process.env.API_KEY;
+        const exists = !!key && key.length > 20;
         return {
-            preview: key ? `${key.substring(0, 10)}...${key.substring(key.length - 4)}` : "Error",
-            fullMatch: true, 
-            source: "Sistema Integrado (Core)"
+            preview: exists ? `Conectado (${key.substring(0, 4)}...)` : "No Detectada",
+            fullMatch: exists, 
+            source: exists ? "Variable de Entorno (Vercel Injected)" : "Ninguna"
         };
     };
-    
     const keyInfo = getActiveKeyInfo();
 
+    // --- AVATAR HANDLERS ---
+    const handleAvatarUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+        if (e.target.files && e.target.files[0]) {
+            const reader = new FileReader();
+            reader.onload = (ev) => {
+                const result = ev.target?.result as string;
+                setTempAvatarFile(result);
+                setUser({ ...user, logoUrl: result });
+            };
+            reader.readAsDataURL(e.target.files[0]);
+        }
+    };
+
+    const setCortexAvatar = () => {
+        setUser({ ...user, logoUrl: 'cortex://avatar' });
+    };
+
+    const setInitialsAvatar = () => {
+        setUser({ ...user, logoUrl: '' });
+    };
+
+    // --- UNIVERSITY LOGIC (AI POWERED & SAFE) ---
+    const handleSearchChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+        const val = e.target.value;
+        setSearchTerm(val);
+        
+        // 1. Search Local Database first (Instant)
+        if (val.length > 1) {
+            const localMatches = searchUniversityDatabase(val);
+            setUniResults(localMatches);
+            setShowUniResults(true);
+        } else {
+            setShowUniResults(false);
+        }
+    };
+
+    const triggerAiSearch = async () => {
+        if (!searchTerm || searchTerm.length < 3) return;
+        setIsAiSearching(true);
+        setShowUniResults(true);
+        setUniResults([]);
+
+        try {
+            const aiMatches = await searchUniversityWithAI(searchTerm);
+            setUniResults(aiMatches);
+        } catch (error) {
+            console.error(error);
+        } finally {
+            setIsAiSearching(false);
+        }
+    };
+
+    const selectUniversity = (uni: UniversityMatch) => {
+        // Use the safe logo provided by the engine
+        setUser({ ...user, university: uni.name, logoUrl: uni.logo }); 
+        setSearchTerm(uni.name);
+        setManualUrl(uni.domain);
+        setShowUniResults(false);
+    };
+
+    const handleManualUrlChange = (val: string) => {
+        setManualUrl(val);
+        setIsValidatingUrl(true);
+        
+        const timer = setTimeout(() => {
+            if (val.includes('.') && val.length > 4) {
+                const domain = val.replace(/^https?:\/\//, '').replace(/\/$/, '');
+                // Force safe Google logo
+                const logo = getUniversityLogo(domain);
+                setUser({ ...user, logoUrl: logo });
+            }
+            setIsValidatingUrl(false);
+        }, 500);
+        
+        return () => clearTimeout(timer);
+    };
+
+    // --- DATA HANDLERS ---
     const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
         if (!e.target.files) return;
         const fileReader = new FileReader();
@@ -82,13 +192,6 @@ export const SettingsModule: React.FC<{ user: User; setUser: (u: User) => void; 
                 }
             } catch (err) { alert("Error al leer el archivo."); }
         };
-    };
-
-    const handleClearData = () => {
-        if(confirm("⚠️ ¿Estás seguro? Se borrarán todas tus materias, tareas y configuraciones. Esta acción es irreversible.")) {
-            localStorage.clear();
-            window.location.reload();
-        }
     };
 
     const handleJsonExport = () => {
@@ -122,6 +225,85 @@ export const SettingsModule: React.FC<{ user: User; setUser: (u: User) => void; 
         XLSX.writeFile(wb, `Cortex_Reporte_${(user.name || "Estudiante").split(' ')[0]}_${new Date().toISOString().split('T')[0]}.xlsx`);
     };
 
+    // --- ROBUST SECURITY HANDLERS ---
+    const addLog = (msg: string) => {
+        setSecurityModal(prev => ({ ...prev, log: [...prev.log, `> ${msg}`] }));
+    };
+
+    const executeReset = async () => {
+        setSecurityModal(prev => ({ ...prev, step: 'processing', log: [] }));
+        addLog("Iniciando proceso de limpieza...");
+        try {
+            addLog("Limpiando almacenamiento local...");
+            localStorage.removeItem('ctx_courses');
+            localStorage.removeItem('ctx_tasks');
+            localStorage.removeItem('ctx_notes');
+            addLog("LocalStorage limpio.");
+            if (auth?.currentUser) {
+                addLog(`Detectado usuario: ${auth.currentUser.email}`);
+                addLog("Conectando a Firestore...");
+                await updateDoc(doc(db, "users", auth.currentUser.uid), { courses: [], tasks: [], notes: "" });
+                addLog("Nube sincronizada: Datos eliminados.");
+            } else {
+                addLog("Modo Invitado: Omitiendo nube.");
+            }
+            addLog("¡Éxito! Reiniciando sistema...");
+            setSecurityModal(prev => ({ ...prev, step: 'success' }));
+            setTimeout(() => window.location.reload(), 2000);
+        } catch (error: any) {
+            console.error(error);
+            addLog(`ERROR CRÍTICO: ${error.message}`);
+            setSecurityModal(prev => ({ ...prev, step: 'error' }));
+        }
+    };
+
+    const executeDeleteAccount = async () => {
+        setSecurityModal(prev => ({ ...prev, step: 'processing', log: [] }));
+        addLog("Iniciando destrucción de cuenta...");
+        try {
+            const currentUser = auth?.currentUser;
+            if (!currentUser) {
+                addLog("No hay sesión activa. Limpiando localmente...");
+                localStorage.clear();
+                window.location.href = "/";
+                return;
+            }
+            addLog("Eliminando documento de base de datos...");
+            try { await deleteDoc(doc(db, "users", currentUser.uid)); addLog("Datos de usuario eliminados."); } catch (e: any) { addLog(`Advertencia Firestore: ${e.message}`); }
+            addLog("Intentando eliminar credencial de acceso...");
+            try {
+                await deleteUser(currentUser);
+                addLog("Usuario eliminado de Firebase Auth.");
+            } catch (error: any) {
+                if (error.code === 'auth/requires-recent-login') {
+                    addLog("⚠️ SEGURIDAD: Se requiere re-autenticación.");
+                    addLog("Solicitando confirmación de identidad...");
+                    try {
+                        if (currentUser.providerData[0]?.providerId === 'google.com') {
+                            await reauthenticateWithPopup(currentUser, googleProvider);
+                        } else {
+                            throw new Error("Por seguridad, cierra sesión y vuelve a entrar para borrar la cuenta.");
+                        }
+                        addLog("Identidad confirmada. Reintentando eliminación...");
+                        await deleteUser(currentUser);
+                        addLog("Usuario eliminado exitosamente.");
+                    } catch (reAuthError: any) {
+                        addLog(`FALLÓ RE-AUTH: ${reAuthError.message}`);
+                        throw reAuthError;
+                    }
+                } else { throw error; }
+            }
+            addLog("Limpiando rastros locales...");
+            localStorage.clear();
+            setSecurityModal(prev => ({ ...prev, step: 'success' }));
+            setTimeout(() => window.location.href = "/", 2000);
+        } catch (error: any) {
+            console.error(error);
+            addLog(`ERROR FATAL: ${error.message}`);
+            setSecurityModal(prev => ({ ...prev, step: 'error' }));
+        }
+    };
+
     const SettingsSidebarItem = ({ id, icon: Icon, label }: any) => (
         <button onClick={() => setActiveSection(id)} className={`w-full flex items-center gap-3 p-3 rounded-xl transition-all font-medium text-sm mb-1 text-left ${activeSection === id ? 'bg-[var(--accent)] text-white shadow-md' : 'text-[var(--text-secondary)] hover:bg-[var(--bg-input)] hover:text-[var(--text-primary)]'}`}>
             <Icon size={18} /> {label}
@@ -130,56 +312,194 @@ export const SettingsModule: React.FC<{ user: User; setUser: (u: User) => void; 
     );
 
     return (
-        <div className="max-w-6xl mx-auto anim-enter pb-10 h-full flex flex-col">
+        <div className="max-w-6xl mx-auto anim-enter pb-10 h-full flex flex-col relative">
             <h2 className="text-3xl font-bold text-[var(--text-primary)] mb-8">Panel de Control</h2>
             <div className="flex flex-col md:flex-row gap-8 flex-1">
                 <div className="w-full md:w-64 flex-shrink-0">
                     <div className="card-modern p-4 sticky top-6">
                         <div className="mb-6 px-2">
                             <p className="text-xs font-bold text-[var(--text-secondary)] uppercase tracking-widest mb-1">General</p>
-                            <SettingsSidebarItem id="profile" icon={UserIcon} label="Perfil" />
+                            <SettingsSidebarItem id="profile" icon={UserIcon} label="Perfil & Identidad" />
                             <SettingsSidebarItem id="academic" icon={GraduationCap} label="Académico" />
                             <SettingsSidebarItem id="ai" icon={Cpu} label="IA & Logros" />
                             <SettingsSidebarItem id="appearance" icon={Palette} label="Apariencia" />
                         </div>
                         <div className="mb-2 px-2">
                              <p className="text-xs font-bold text-[var(--text-secondary)] uppercase tracking-widest mb-1">Sistema</p>
-                             <SettingsSidebarItem id="data" icon={Database} label="Datos & Backup" />
+                             <SettingsSidebarItem id="data" icon={Database} label="Datos & Cuenta" />
                              <SettingsSidebarItem id="info" icon={Shield} label="Legal & Info" />
                         </div>
                     </div>
                 </div>
                 <div className="flex-1 min-w-0">
                     
-                    {/* PROFILE SECTION */}
+                    {/* IDENTITY STUDIO (REBUILT PROFILE SECTION) */}
                     {activeSection === 'profile' && (
                         <div className="anim-enter space-y-6">
-                            <div className="card-modern p-8 relative overflow-hidden">
-                                <div className="absolute top-0 left-0 w-full h-24 bg-gradient-to-r from-[var(--accent)]/20 to-[var(--royal)]/20"></div>
-                                <div className="relative flex items-end gap-6 mb-6 mt-4">
-                                    <div className="w-24 h-24 rounded-full bg-[var(--bg-card)] border-4 border-[var(--bg-card)] shadow-xl flex items-center justify-center text-[var(--text-primary)] text-3xl font-bold overflow-hidden">
-                                         {user.logoUrl ? (
-                                            <img 
-                                                src={user.logoUrl} 
-                                                className="w-full h-full object-contain p-2" 
-                                                onError={(e) => {
-                                                    e.currentTarget.src = `https://ui-avatars.com/api/?name=${encodeURIComponent(user.name || 'User')}&background=random&color=fff&size=128`;
-                                                }}
-                                            />
-                                         ) : (
-                                            (user.name || "U").charAt(0)
-                                         )}
+                            
+                            {/* 1. IDENTITY CARD */}
+                            <div className="card-modern overflow-hidden relative border border-[var(--border-color)]">
+                                <div className="absolute top-0 left-0 w-full h-32 bg-gradient-to-r from-[var(--accent)]/10 to-[var(--royal)]/10"></div>
+                                
+                                <div className="p-8 relative pt-12">
+                                    <div className="flex flex-col md:flex-row gap-8 items-start">
+                                        
+                                        {/* AVATAR EDITOR */}
+                                        <div className="flex flex-col items-center gap-4">
+                                            <div className="relative group cursor-pointer" onClick={() => avatarInputRef.current?.click()}>
+                                                <div className="w-32 h-32 rounded-full bg-[var(--bg-card)] border-4 border-[var(--bg-card)] shadow-2xl flex items-center justify-center text-[var(--text-primary)] text-4xl font-bold overflow-hidden relative z-10 hover:scale-105 transition-transform">
+                                                     {user.logoUrl === 'cortex://avatar' ? (
+                                                         <div className="w-full h-full scale-125"><CortexAvatar mood="happy" size={128} /></div>
+                                                     ) : user.logoUrl ? (
+                                                        <img 
+                                                            src={user.logoUrl} 
+                                                            className="w-full h-full object-contain bg-white p-2" 
+                                                            onError={(e) => {
+                                                                // Use UI Avatars ONLY as a last resort fallback
+                                                                e.currentTarget.src = `https://ui-avatars.com/api/?name=${encodeURIComponent(user.name || 'User')}&background=random&color=fff&size=128`;
+                                                            }}
+                                                        />
+                                                     ) : (
+                                                        (user.name || "U").charAt(0)
+                                                     )}
+                                                     
+                                                     {/* Overlay Edit Icon */}
+                                                     <div className="absolute inset-0 bg-black/40 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity">
+                                                         <Camera size={24} className="text-white"/>
+                                                     </div>
+                                                </div>
+                                                {/* Hidden File Input */}
+                                                <input ref={avatarInputRef} type="file" accept="image/*" onChange={handleAvatarUpload} className="hidden" />
+                                            </div>
+
+                                            {/* Avatar Controls */}
+                                            <div className="flex gap-2">
+                                                <button onClick={() => avatarInputRef.current?.click()} className="p-2 rounded-lg bg-[var(--bg-input)] hover:bg-[var(--accent)] hover:text-white transition-colors border border-[var(--border-color)]" title="Subir Foto"><ImageIcon size={16}/></button>
+                                                <button onClick={setCortexAvatar} className="p-2 rounded-lg bg-[var(--bg-input)] hover:bg-[var(--royal)] hover:text-white transition-colors border border-[var(--border-color)]" title="Usar Cortex Avatar"><Sparkles size={16}/></button>
+                                                <button onClick={setInitialsAvatar} className="p-2 rounded-lg bg-[var(--bg-input)] hover:bg-[var(--text-primary)] hover:text-[var(--bg-main)] transition-colors border border-[var(--border-color)]" title="Restaurar Iniciales"><Type size={16}/></button>
+                                            </div>
+                                        </div>
+
+                                        {/* USER DETAILS FORM */}
+                                        <div className="flex-1 w-full space-y-5">
+                                            <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
+                                                <div className="group">
+                                                    <label className="text-xs font-bold text-[var(--text-secondary)] uppercase mb-1.5 flex items-center gap-1"><UserIcon size={12}/> Nombre</label>
+                                                    <input className="w-full input-glass font-bold" value={user.name} onChange={e => setUser({...user, name: e.target.value})} />
+                                                </div>
+                                                <div className="group opacity-70">
+                                                    <label className="text-xs font-bold text-[var(--text-secondary)] uppercase mb-1.5 flex items-center gap-1"><Fingerprint size={12}/> ID / Correo</label>
+                                                    <input className="w-full input-glass bg-[var(--bg-main)] cursor-not-allowed" value={user.email || 'Invitado'} disabled />
+                                                </div>
+                                            </div>
+
+                                            {/* SMART UNIVERSITY SELECTOR (AI POWERED) */}
+                                            <div className="relative group/search">
+                                                <label className="text-xs font-bold text-[var(--text-secondary)] uppercase mb-1.5 flex items-center gap-1"><Building2 size={12}/> Universidad / Institución</label>
+                                                <div className="relative flex gap-2">
+                                                    <div className="relative flex-1">
+                                                        <input 
+                                                            className="w-full input-glass pr-10" 
+                                                            value={searchTerm} 
+                                                            onChange={handleSearchChange}
+                                                            onKeyDown={(e) => e.key === 'Enter' && triggerAiSearch()}
+                                                            placeholder="Escribe el nombre de tu universidad..."
+                                                        />
+                                                        {user.university && !isAiSearching && (
+                                                            <div className="absolute right-3 top-3.5 text-[var(--success)]">
+                                                                <CheckCircle2 size={16}/>
+                                                            </div>
+                                                        )}
+                                                    </div>
+                                                    
+                                                    {/* AI Search Trigger Button */}
+                                                    <button 
+                                                        onClick={triggerAiSearch} 
+                                                        disabled={isAiSearching || searchTerm.length < 3}
+                                                        className="px-3 bg-[var(--accent)] text-white rounded-xl shadow-lg hover:brightness-110 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center transition-all"
+                                                        title="Buscar Dominio Real con IA"
+                                                    >
+                                                        {isAiSearching ? <Loader2 size={18} className="animate-spin"/> : <Search size={18}/>}
+                                                    </button>
+                                                </div>
+                                                
+                                                {/* Suggestions Dropdown (High Z-Index Fix) */}
+                                                {showUniResults && (
+                                                    <div className="absolute top-full left-0 right-0 mt-2 bg-[var(--bg-card)] border border-[var(--border-color)] rounded-xl shadow-2xl z-[100] max-h-56 overflow-y-auto">
+                                                        
+                                                        {isAiSearching && (
+                                                            <div className="p-4 flex items-center justify-center gap-3 text-[var(--text-secondary)]">
+                                                                <Loader2 size={16} className="animate-spin text-[var(--accent)]"/>
+                                                                <span className="text-xs font-bold">Analizando dominios web...</span>
+                                                            </div>
+                                                        )}
+
+                                                        {!isAiSearching && uniResults.map((u, i) => (
+                                                            <button 
+                                                                key={i} 
+                                                                onClick={() => selectUniversity(u)}
+                                                                className="w-full text-left p-3 hover:bg-[var(--bg-input)] text-sm font-medium border-b border-[var(--border-color)] last:border-0 flex items-center gap-3 group/item transition-colors"
+                                                            >
+                                                                {/* Logo Preview in Dropdown */}
+                                                                <div className="w-8 h-8 rounded-lg bg-white p-1 flex items-center justify-center border border-[var(--border-color)] shrink-0 overflow-hidden">
+                                                                    <img 
+                                                                        src={u.logo} 
+                                                                        className="w-full h-full object-contain" 
+                                                                        alt="" 
+                                                                        onError={(e) => { e.currentTarget.style.display = 'none'; }}
+                                                                    />
+                                                                </div>
+                                                                <div className="flex-1 min-w-0">
+                                                                    <span className="block truncate font-bold text-[var(--text-primary)]">{u.name}</span>
+                                                                    <span className="text-[10px] text-[var(--text-secondary)] opacity-80 flex items-center gap-1">
+                                                                        <Globe size={10}/> {u.domain}
+                                                                        {u.country === 'Búsqueda IA' && <span className="bg-[var(--accent)]/10 text-[var(--accent)] px-1.5 rounded ml-1">IA</span>}
+                                                                    </span>
+                                                                </div>
+                                                                <MousePointerClick size={14} className="opacity-0 group-hover/item:opacity-100 text-[var(--accent)]"/>
+                                                            </button>
+                                                        ))}
+                                                        
+                                                        {!isAiSearching && uniResults.length === 0 && searchTerm.length > 2 && (
+                                                            <div className="p-4 text-center">
+                                                                <p className="text-xs text-[var(--text-secondary)] mb-2">No encontrado en base local.</p>
+                                                                <button onClick={triggerAiSearch} className="text-xs font-bold text-[var(--accent)] hover:underline flex items-center justify-center gap-1 w-full">
+                                                                    <Sparkles size={12}/> Probar búsqueda inteligente
+                                                                </button>
+                                                            </div>
+                                                        )}
+                                                        
+                                                        <button onClick={() => setShowUniResults(false)} className="w-full text-center p-2 text-xs text-[var(--text-secondary)] hover:text-[var(--accent)] font-bold bg-[var(--bg-input)]/50 sticky bottom-0 backdrop-blur-sm">Cerrar</button>
+                                                    </div>
+                                                )}
+                                            </div>
+
+                                            {/* MANUAL LOGO OVERRIDE */}
+                                            <div className="pt-2 border-t border-[var(--border-color)]">
+                                                <div className="group">
+                                                    <label className="text-[10px] font-bold text-[var(--text-secondary)] uppercase flex items-center gap-1 mb-2">
+                                                        <Link2 size={12}/> URL Directa (Opción Manual)
+                                                    </label>
+                                                    <div className="flex gap-2 relative">
+                                                        <input 
+                                                            className="w-full p-2 rounded-lg bg-[var(--bg-input)] border border-[var(--border-color)] text-xs font-mono text-[var(--text-primary)] outline-none focus:border-[var(--accent)] transition-all pr-8" 
+                                                            placeholder="ej: harvard.edu"
+                                                            value={manualUrl}
+                                                            onChange={e => handleManualUrlChange(e.target.value)}
+                                                        />
+                                                        {isValidatingUrl && (
+                                                            <div className="absolute right-2 top-2">
+                                                                <Loader2 size={14} className="animate-spin text-[var(--accent)]"/>
+                                                            </div>
+                                                        )}
+                                                    </div>
+                                                    <p className="text-[10px] text-[var(--text-secondary)] mt-1.5 opacity-70">
+                                                        Si la IA falla, escribe aquí el dominio oficial (ej: <code>mit.edu</code>) para forzar la carga del logo.
+                                                    </p>
+                                                </div>
+                                            </div>
+                                        </div>
                                     </div>
-                                    <div className="mb-2">
-                                        <h3 className="text-2xl font-bold text-[var(--text-primary)]">{user.name}</h3>
-                                        <p className="text-[var(--text-secondary)]">{user.email || 'usuario@local.host'}</p>
-                                    </div>
-                                </div>
-                                <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-6">
-                                    <div><label className="text-xs font-bold text-[var(--text-secondary)] uppercase mb-2 block">Nombre Completo</label><input className="w-full input-glass" value={user.name} onChange={e => setUser({...user, name: e.target.value})} /></div>
-                                    <div><label className="text-xs font-bold text-[var(--text-secondary)] uppercase mb-2 block">Universidad</label><input className="w-full input-glass" value={user.university || ''} onChange={e => setUser({...user, university: e.target.value})} /></div>
-                                    <div><label className="text-xs font-bold text-[var(--text-secondary)] uppercase mb-2 block">Carrera</label><input className="w-full input-glass" value={user.career || ''} onChange={e => setUser({...user, career: e.target.value})} /></div>
-                                    <div><label className="text-xs font-bold text-[var(--text-secondary)] uppercase mb-2 block">Semestre Actual</label><select className="w-full input-glass" value={user.semester} onChange={e => setUser({...user, semester: parseInt(e.target.value)})}>{[1,2,3,4,5,6,7,8,9,10,11,12].map(i => <option key={i} value={i}>{i}º Semestre</option>)}</select></div>
                                 </div>
                             </div>
                             
@@ -204,7 +524,7 @@ export const SettingsModule: React.FC<{ user: User; setUser: (u: User) => void; 
                         </div>
                     )}
 
-                    {/* AI & GAMIFICATION SECTION */}
+                    {/* AI & GAMIFICATION SECTION (RESTORED) */}
                     {activeSection === 'ai' && (
                         <div className="anim-enter space-y-6">
                             {/* Model Selector */}
@@ -286,7 +606,7 @@ export const SettingsModule: React.FC<{ user: User; setUser: (u: User) => void; 
                         </div>
                     )}
 
-                    {/* ACADEMIC SECTION */}
+                    {/* ACADEMIC SECTION (RESTORED) */}
                     {activeSection === 'academic' && (
                         <div className="anim-enter space-y-6">
                             <div className="card-modern p-8">
@@ -342,8 +662,8 @@ export const SettingsModule: React.FC<{ user: User; setUser: (u: User) => void; 
                         </div>
                     )}
 
-                    {/* APPEARANCE SECTION */}
-                     {activeSection === 'appearance' && (
+                    {/* APPEARANCE SECTION (RESTORED) */}
+                    {activeSection === 'appearance' && (
                         <div className="anim-enter space-y-6">
                              <div className="card-modern p-8">
                                 <h3 className="text-xl font-bold text-[var(--text-primary)] mb-6">Tema de Interfaz</h3>
@@ -361,9 +681,20 @@ export const SettingsModule: React.FC<{ user: User; setUser: (u: User) => void; 
                                 <div className="border-t border-[var(--border-color)] pt-8 mt-8">
                                     <h3 className="text-xl font-bold text-[var(--text-primary)] mb-6 flex items-center gap-2">Personalización Avanzada <span className="text-[10px] bg-[var(--accent)] text-white px-2 py-0.5 rounded-full uppercase">Nuevo</span></h3>
                                     
+                                    {/* BENCHMARK TRIGGER */}
+                                    <div className="mb-4">
+                                        <button 
+                                            onClick={onRunBenchmark}
+                                            className="w-full p-4 rounded-xl border border-[var(--border-color)] bg-[var(--bg-input)] hover:border-[var(--accent)] hover:text-[var(--accent)] flex items-center justify-center gap-3 font-bold text-sm transition-all"
+                                        >
+                                            <Gauge size={20}/>
+                                            Recalibrar Rendimiento (Benchmark)
+                                        </button>
+                                    </div>
+
                                     {/* ECO MODE SWITCH */}
                                     <div 
-                                        className={`mb-6 p-4 rounded-xl border flex items-center justify-between cursor-pointer transition-all ${prefs.lowPowerMode ? 'bg-emerald-500/10 border-emerald-500' : 'bg-[var(--bg-input)] border-[var(--border-color)]'}`}
+                                        className={`mb-4 p-4 rounded-xl border flex items-center justify-between cursor-pointer transition-all ${prefs.lowPowerMode ? 'bg-emerald-500/10 border-emerald-500' : 'bg-[var(--bg-input)] border-[var(--border-color)]'}`}
                                         onClick={() => updatePrefs({ lowPowerMode: !prefs.lowPowerMode })}
                                     >
                                         <div className="flex items-center gap-4">
@@ -377,6 +708,25 @@ export const SettingsModule: React.FC<{ user: User; setUser: (u: User) => void; 
                                         </div>
                                         <div className={`w-12 h-7 rounded-full p-1 transition-colors ${prefs.lowPowerMode ? 'bg-emerald-500' : 'bg-[var(--border-color)]'}`}>
                                             <div className={`w-5 h-5 bg-white rounded-full shadow-md transition-transform ${prefs.lowPowerMode ? 'translate-x-5' : ''}`}></div>
+                                        </div>
+                                    </div>
+
+                                    {/* COMPACT MODE SWITCH (NEW) */}
+                                    <div 
+                                        className={`mb-6 p-4 rounded-xl border flex items-center justify-between cursor-pointer transition-all ${prefs.compactMode ? 'bg-indigo-500/10 border-indigo-500' : 'bg-[var(--bg-input)] border-[var(--border-color)]'}`}
+                                        onClick={() => updatePrefs({ compactMode: !prefs.compactMode })}
+                                    >
+                                        <div className="flex items-center gap-4">
+                                            <div className={`p-3 rounded-xl ${prefs.compactMode ? 'bg-indigo-500 text-white' : 'bg-[var(--bg-card)] text-[var(--text-secondary)]'}`}>
+                                                <Smartphone size={24}/>
+                                            </div>
+                                            <div>
+                                                <p className="font-bold text-[var(--text-primary)]">Modo Compacto (DPI Alto)</p>
+                                                <p className="text-xs text-[var(--text-secondary)] mt-0.5">Reduce el tamaño de la interfaz en móviles para mostrar más contenido.</p>
+                                            </div>
+                                        </div>
+                                        <div className={`w-12 h-7 rounded-full p-1 transition-colors ${prefs.compactMode ? 'bg-indigo-500' : 'bg-[var(--border-color)]'}`}>
+                                            <div className={`w-5 h-5 bg-white rounded-full shadow-md transition-transform ${prefs.compactMode ? 'translate-x-5' : ''}`}></div>
                                         </div>
                                     </div>
 
@@ -491,11 +841,13 @@ export const SettingsModule: React.FC<{ user: User; setUser: (u: User) => void; 
                         </div>
                     )}
 
-                    {/* DATA SECTION */}
+                    {/* DATA SECTION (REBUILT & CONNECTED) */}
                     {activeSection === 'data' && (
                         <div className="anim-enter space-y-6">
+                            
+                            {/* IMPORT / EXPORT */}
                             <div className="card-modern p-8">
-                                <h3 className="text-xl font-bold text-[var(--text-primary)] mb-6">Exportar Datos</h3>
+                                <h3 className="text-xl font-bold text-[var(--text-primary)] mb-6">Gestionar Datos</h3>
                                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                                     <button onClick={handleExcelExport} className="p-4 rounded-xl border border-[var(--border-color)] hover:border-[var(--success)] hover:bg-[var(--success)]/5 group text-left transition-all">
                                         <div className="flex items-center gap-3 mb-2">
@@ -513,24 +865,134 @@ export const SettingsModule: React.FC<{ user: User; setUser: (u: User) => void; 
                                         <p className="text-xs text-[var(--text-secondary)]">Guarda una copia de seguridad completa de tu base de datos local.</p>
                                     </button>
                                 </div>
-                            </div>
-
-                            <div className="card-modern p-8">
-                                <h3 className="text-xl font-bold text-[var(--text-primary)] mb-6">Restaurar Datos</h3>
-                                <div className="border-2 border-dashed border-[var(--border-color)] rounded-xl p-8 text-center hover:bg-[var(--bg-input)] transition-colors cursor-pointer" onClick={() => fileInputRef.current?.click()}>
+                                <div className="mt-4 border-2 border-dashed border-[var(--border-color)] rounded-xl p-4 text-center hover:bg-[var(--bg-input)] transition-colors cursor-pointer" onClick={() => fileInputRef.current?.click()}>
                                     <input type="file" ref={fileInputRef} onChange={handleFileChange} accept=".json" className="hidden" />
-                                    <Upload size={32} className="mx-auto text-[var(--text-secondary)] mb-2"/>
-                                    <p className="font-bold text-[var(--text-primary)]">Click para subir Backup (.json)</p>
-                                    <p className="text-xs text-[var(--text-secondary)] mt-1">Esto reemplazará tus datos actuales.</p>
+                                    <div className="flex items-center justify-center gap-2 text-[var(--text-secondary)]">
+                                        <Upload size={16}/>
+                                        <span className="text-xs font-bold">Restaurar copia de seguridad (.json)</span>
+                                    </div>
                                 </div>
                             </div>
 
-                            <div className="p-6 rounded-2xl bg-rose-50 border border-rose-200 dark:bg-rose-900/10 dark:border-rose-900/30">
-                                <h3 className="text-lg font-bold text-rose-700 dark:text-rose-400 mb-2 flex items-center gap-2"><AlertTriangle size={20}/> Zona de Peligro</h3>
-                                <p className="text-sm text-rose-600/80 dark:text-rose-400/80 mb-4">Esta acción borrará todas tus materias, notas y configuraciones de este dispositivo. No se puede deshacer.</p>
-                                <button onClick={handleClearData} className="px-6 py-2.5 bg-rose-600 hover:bg-rose-700 text-white rounded-xl font-bold text-sm shadow-md transition-colors">
-                                    Borrar Todo y Reiniciar
-                                </button>
+                            {/* ADVANCED ACCOUNT MANAGEMENT */}
+                            <div className="card-modern p-8 border border-red-200 dark:border-red-900 bg-red-50/10 dark:bg-red-900/5">
+                                <h3 className="text-xl font-bold text-red-600 dark:text-red-400 mb-6 flex items-center gap-2">
+                                    <Shield size={24}/> Centro de Seguridad
+                                </h3>
+                                
+                                <div className="space-y-4">
+                                    {/* RESET CARD */}
+                                    <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 p-5 rounded-xl bg-[var(--bg-card)] border border-red-100 dark:border-red-900/50 shadow-sm">
+                                        <div>
+                                            <h4 className="font-bold text-[var(--text-primary)] text-sm mb-1 flex items-center gap-2"><RefreshCcw size={16} className="text-orange-500"/> Reinicio de Fábrica</h4>
+                                            <p className="text-xs text-[var(--text-secondary)] max-w-sm">Elimina todas las materias, tareas y notas. Mantiene tu usuario y logros.</p>
+                                        </div>
+                                        <button 
+                                            onClick={() => { setSecurityModal({ isOpen: true, type: 'reset', step: 'confirm', log: [] }); setConfirmationInput(''); }}
+                                            className="px-5 py-2.5 bg-orange-500/10 text-orange-600 hover:bg-orange-500 hover:text-white font-bold text-xs rounded-lg transition-all border border-orange-500/20"
+                                        >
+                                            Limpiar Datos
+                                        </button>
+                                    </div>
+
+                                    {/* DELETE CARD */}
+                                    <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 p-5 rounded-xl bg-[var(--bg-card)] border border-red-100 dark:border-red-900/50 shadow-sm">
+                                        <div>
+                                            <h4 className="font-bold text-[var(--text-primary)] text-sm mb-1 flex items-center gap-2"><UserX size={16} className="text-red-600"/> Eliminación Definitiva</h4>
+                                            <p className="text-xs text-[var(--text-secondary)] max-w-sm">Borra tu cuenta de Firebase, revoca acceso y destruye todos los datos.</p>
+                                        </div>
+                                        <button 
+                                            onClick={() => { setSecurityModal({ isOpen: true, type: 'delete', step: 'confirm', log: [] }); setConfirmationInput(''); }}
+                                            className="px-5 py-2.5 bg-red-600 text-white font-bold text-xs rounded-lg hover:bg-red-700 transition-all shadow-md"
+                                        >
+                                            Eliminar Cuenta
+                                        </button>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+
+                    {/* SECURITY MODAL */}
+                    {securityModal.isOpen && (
+                        <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/80 backdrop-blur-md anim-enter">
+                            <div className="w-full max-w-lg bg-[var(--bg-card)] rounded-2xl shadow-2xl border border-[var(--border-color)] overflow-hidden flex flex-col max-h-[90vh]">
+                                
+                                {/* Header */}
+                                <div className="p-6 border-b border-[var(--border-color)] bg-[var(--bg-input)]/50 flex justify-between items-center">
+                                    <h3 className="text-lg font-bold text-[var(--text-primary)] flex items-center gap-2">
+                                        {securityModal.type === 'delete' ? <UserX size={20} className="text-red-600"/> : <RefreshCcw size={20} className="text-orange-500"/>}
+                                        {securityModal.type === 'delete' ? 'Eliminar Cuenta' : 'Limpiar Datos'}
+                                    </h3>
+                                    {securityModal.step !== 'processing' && (
+                                        <button onClick={() => setSecurityModal({...securityModal, isOpen: false})} className="p-2 hover:bg-[var(--bg-input)] rounded-full text-[var(--text-secondary)]"><X size={20}/></button>
+                                    )}
+                                </div>
+
+                                {/* Body */}
+                                <div className="p-6 space-y-6 overflow-y-auto">
+                                    {securityModal.step === 'confirm' && (
+                                        <div className="space-y-4">
+                                            <div className="p-4 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-xl flex gap-3">
+                                                <AlertTriangle size={24} className="text-red-600 shrink-0"/>
+                                                <div>
+                                                    <h4 className="font-bold text-red-700 dark:text-red-400 text-sm mb-1">¡Advertencia de Seguridad!</h4>
+                                                    <p className="text-xs text-[var(--text-secondary)] leading-relaxed">
+                                                        Estás a punto de ejecutar una acción destructiva. 
+                                                        {securityModal.type === 'delete' 
+                                                            ? ' Se eliminará tu identidad en la nube, tus copias de seguridad y todos tus registros locales. Esta acción no se puede deshacer.'
+                                                            : ' Se borrarán todas tus materias y tareas locales y en la nube. Tendrás que empezar de cero.'
+                                                        }
+                                                    </p>
+                                                </div>
+                                            </div>
+
+                                            <div>
+                                                <label className="text-xs font-bold text-[var(--text-secondary)] mb-2 block uppercase tracking-wider">Confirmación Requerida</label>
+                                                <p className="text-xs mb-2">Escribe <span className="font-mono font-bold select-all bg-[var(--bg-input)] px-1 rounded">{securityModal.type === 'delete' ? 'ELIMINAR' : 'LIMPIAR'}</span> para continuar:</p>
+                                                <input 
+                                                    autoFocus
+                                                    value={confirmationInput}
+                                                    onChange={e => setConfirmationInput(e.target.value)}
+                                                    className="w-full p-3 rounded-xl border border-[var(--border-color)] bg-[var(--bg-input)] outline-none focus:border-red-500 transition-colors font-mono font-bold tracking-widest text-center uppercase"
+                                                    placeholder="Escribe aquí..."
+                                                />
+                                            </div>
+                                        </div>
+                                    )}
+
+                                    {(securityModal.step === 'processing' || securityModal.step === 'success' || securityModal.step === 'error') && (
+                                        <div className="bg-black text-green-400 font-mono text-xs p-4 rounded-xl h-64 overflow-y-auto border border-gray-800 shadow-inner">
+                                            {securityModal.log.map((line, i) => (
+                                                <div key={i} className="mb-1">{line}</div>
+                                            ))}
+                                            {securityModal.step === 'processing' && <div className="animate-pulse">_</div>}
+                                        </div>
+                                    )}
+                                </div>
+
+                                {/* Footer */}
+                                <div className="p-6 border-t border-[var(--border-color)] bg-[var(--bg-input)]/50 flex justify-end gap-3">
+                                    {securityModal.step === 'confirm' ? (
+                                        <>
+                                            <button onClick={() => setSecurityModal({...securityModal, isOpen: false})} className="px-4 py-2 text-xs font-bold text-[var(--text-secondary)] hover:text-[var(--text-primary)]">Cancelar</button>
+                                            <button 
+                                                disabled={confirmationInput !== (securityModal.type === 'delete' ? 'ELIMINAR' : 'LIMPIAR')}
+                                                onClick={securityModal.type === 'delete' ? executeDeleteAccount : executeReset}
+                                                className="px-6 py-2 bg-red-600 text-white rounded-lg text-xs font-bold shadow-lg hover:bg-red-700 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
+                                            >
+                                                <Fingerprint size={16}/> Confirmar
+                                            </button>
+                                        </>
+                                    ) : securityModal.step === 'error' ? (
+                                        <button onClick={() => setSecurityModal({...securityModal, isOpen: false})} className="px-6 py-2 bg-[var(--bg-input)] border border-[var(--border-color)] text-[var(--text-primary)] rounded-lg text-xs font-bold">Cerrar</button>
+                                    ) : (
+                                        <div className="text-xs font-bold text-[var(--text-secondary)] flex items-center gap-2">
+                                            {securityModal.step === 'processing' ? <Loader2 size={14} className="animate-spin"/> : <Check size={14} className="text-green-500"/>}
+                                            {securityModal.step === 'processing' ? 'Procesando...' : 'Completado'}
+                                        </div>
+                                    )}
+                                </div>
                             </div>
                         </div>
                     )}
@@ -545,7 +1007,7 @@ export const SettingsModule: React.FC<{ user: User; setUser: (u: User) => void; 
                                         <Sparkles size={40}/>
                                     </div>
                                     <h2 className="text-3xl font-bold text-[var(--text-primary)] mb-1">Cortex WebOS</h2>
-                                    <p className="text-[var(--text-secondary)] font-medium mb-4">Versión 17.3 (Stable Core)</p>
+                                    <p className="text-[var(--text-secondary)] font-medium mb-4">Versión 17.5 (Stable Core)</p>
                                     
                                     {/* CREDITS BADGE */}
                                     <div className="inline-flex items-center gap-2 px-4 py-1.5 rounded-full bg-[var(--accent)]/10 text-[var(--accent)] text-xs font-bold mb-8 border border-[var(--accent)]/20 shadow-sm animate-in zoom-in duration-500">
@@ -562,13 +1024,13 @@ export const SettingsModule: React.FC<{ user: User; setUser: (u: User) => void; 
                                                 {keyInfo.fullMatch ? (
                                                     <span className="text-[10px] bg-emerald-100 text-emerald-800 dark:bg-emerald-900 dark:text-emerald-100 px-1.5 py-0.5 rounded font-bold">Verificado</span>
                                                 ) : (
-                                                    <span className="text-[10px] bg-amber-100 text-amber-800 dark:bg-amber-900 dark:text-amber-100 px-1.5 py-0.5 rounded font-bold">Respaldo / Otro</span>
+                                                    <span className="text-[10px] bg-amber-100 text-amber-800 dark:bg-amber-900 dark:text-amber-100 px-1.5 py-0.5 rounded font-bold">Sin Conexión</span>
                                                 )}
                                             </div>
                                         </div>
                                         <div className="p-4 space-y-3">
                                             <div className="flex justify-between items-center text-xs">
-                                                <span className="text-[var(--text-secondary)] flex items-center gap-1"><KeyRound size={12}/> Key Activa</span>
+                                                <span className="text-[var(--text-secondary)] flex items-center gap-1"><KeyRound size={12}/> Estado</span>
                                                 <span className="font-mono font-bold text-[var(--text-primary)] bg-[var(--bg-card)] px-2 py-0.5 rounded border border-[var(--border-color)]">
                                                     {keyInfo.preview}
                                                 </span>
@@ -581,7 +1043,7 @@ export const SettingsModule: React.FC<{ user: User; setUser: (u: User) => void; 
                                             </div>
                                             {!keyInfo.fullMatch && (
                                                 <div className="p-2 rounded bg-amber-50 dark:bg-amber-900/20 text-amber-700 dark:text-amber-300 text-[10px] leading-snug">
-                                                    <strong>Nota:</strong> No se está usando la clave principal configurada en Vercel (AIzaSyDi...). Verifica las variables de entorno si esto es un error.
+                                                    <strong>Acción Requerida:</strong> Configura <code>VITE_API_KEY</code> en las variables de entorno de Vercel y re-despliega.
                                                 </div>
                                             )}
                                         </div>

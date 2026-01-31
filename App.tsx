@@ -1,15 +1,16 @@
 
 import React, { useState, useEffect, useRef } from 'react';
 import { LayoutDashboard, FileText, ListTodo, Target, Settings, LogOut, Menu, X, Sparkles, Bot, Send, Brain, Search, Bell, Calendar, AlertTriangle, Info, Check, Loader, Paperclip, Image as ImageIcon, BadgeCheck, HelpCircle, Trophy, Clock, Zap, BookOpen, Database, Network, ChevronLeft, ChevronRight, PanelLeftClose, PanelLeftOpen, Trash2, Download, Wifi, WifiOff, RefreshCw, ShieldAlert } from 'lucide-react';
-import { User, Course, Task, AppTab, AuthState, Achievement } from './types';
+import { User, Course, Task, AppTab, AuthState, Achievement, UserPreferences } from './types';
 import { AuthScreen } from './components/Auth';
 import { OnboardingWizard } from './components/Onboarding';
 import { CourseManagerModal } from './components/CourseManager';
 import { CronosModule, OracleModule, DashboardModule, SettingsModule, CoursesModule, NexusModule } from './components/Modules';
+import { SystemOptimizer } from './components/SystemOptimizer'; // Import Optimizer
 import { TutorialModal } from './components/Tutorial';
 import { MobileNavBar } from './components/MobileNavBar';
 import { ACHIEVEMENTS } from './components/modules/Settings';
-import { generateText, checkAiConnection } from './services/gemini';
+import { generateText, checkAiConnection, getApiKey } from './services/gemini';
 import { isNativeApp, triggerHaptic } from './services/platform';
 // import { GoogleGenAI, FunctionDeclaration, Type } from "@google/genai"; // REMOVED TO FIX BUILD
 import { auth, db, doc, getDoc, setDoc, onAuthStateChanged, signOut } from './services/firebase';
@@ -43,27 +44,6 @@ interface Notification {
   message: string;
 }
 
-const fileToGenerativePart = (file: File): Promise<{ inlineData: { data: string; mimeType: string } }> => {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onloadend = () => {
-      if (typeof reader.result === 'string') {
-          const base64String = reader.result;
-          const base64Data = base64String.split(',')[1];
-          resolve({
-            inlineData: {
-              data: base64Data,
-              mimeType: file.type,
-            },
-          });
-      } else {
-          reject(new Error("Failed to read file"));
-      }
-    };
-    reader.readAsDataURL(file);
-  });
-};
-
 // Default preferences object
 const DEFAULT_PREFS = {
     nebulaIntensity: 0.25,
@@ -74,18 +54,13 @@ const DEFAULT_PREFS = {
     enableTexture: false,
     interfaceRoundness: 'modern' as const,
     sidebarPosition: 'left' as const,
-    lowPowerMode: false
+    lowPowerMode: false,
+    compactMode: false // Default off
 };
 
 // Constants for Chat retention
 const CHAT_RETENTION_DAYS = 30;
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
-
-// Helper to safely get API key in component (Redundant but kept for safety)
-const getClientApiKey = () => {
-    // HARDCODED KEY - SOURCE OF TRUTH
-    return "AIzaSyDiSXYLe-zqKCqtfUSPAZJ9qOzTkK8JsCk";
-};
 
 export default function App() {
   // --- STATE ---
@@ -112,6 +87,9 @@ export default function App() {
   const [currentSemester, setCurrentSemester] = useState(1);
   const [showAiPanel, setShowAiPanel] = useState(false);
   const [showTutorial, setShowTutorial] = useState(false);
+  
+  // SYSTEM BENCHMARK STATE
+  const [showBenchmark, setShowBenchmark] = useState(false);
 
   // Notification State
   const [showNotifications, setShowNotifications] = useState(false);
@@ -215,17 +193,17 @@ export default function App() {
     const prefs = user.preferences || DEFAULT_PREFS;
     const root = document.documentElement;
 
-    // Apply Font - Updated to simply set variable
+    // Apply Font
     root.style.setProperty('--font-family', prefs.fontStyle === 'technical' ? '"JetBrains Mono", monospace' : '"Inter", sans-serif');
 
     // Apply Blur/Glass Strength
-    const blurVal = prefs.glassStrength === 'none' ? '0px' : prefs.glassStrength === 'low' ? '6px' : '12px';
-    const opacityVal = prefs.glassStrength === 'none' ? '0.98' : prefs.glassStrength === 'low' ? '0.95' : '0.85';
+    const blurVal = prefs.glassStrength === 'none' ? '0px' : prefs.glassStrength === 'low' ? '6px' : '10px';
+    const opacityVal = prefs.glassStrength === 'none' ? '0.98' : prefs.glassStrength === 'low' ? '0.95' : '0.92';
     root.style.setProperty('--glass-blur', blurVal);
     root.style.setProperty('--glass-opacity', opacityVal);
 
     // Apply Roundness
-    const radiusCard = prefs.interfaceRoundness === 'none' ? '0px' : prefs.interfaceRoundness === 'full' ? '2rem' : '1rem';
+    const radiusCard = prefs.interfaceRoundness === 'none' ? '0px' : prefs.interfaceRoundness === 'full' ? '2rem' : '1.25rem';
     const radiusInput = prefs.interfaceRoundness === 'none' ? '0px' : prefs.interfaceRoundness === 'full' ? '1rem' : '0.75rem';
     root.style.setProperty('--radius-card', radiusCard);
     root.style.setProperty('--radius-input', radiusInput);
@@ -235,6 +213,13 @@ export default function App() {
       document.body.classList.add('low-power');
     } else {
       document.body.classList.remove('low-power');
+    }
+
+    // --- APPLY COMPACT MODE (MOBILE DPI) ---
+    if (prefs.compactMode) {
+        document.documentElement.classList.add('compact-mode');
+    } else {
+        document.documentElement.classList.remove('compact-mode');
     }
 
   }, [user.preferences]);
@@ -269,6 +254,12 @@ export default function App() {
 
   useEffect(() => {
       if (isInitializing || authState === 'LOGIN') return;
+
+      // Sync Check - If benchmark is not done and user is logged in/guest, trigger it
+      const benchmarkDone = localStorage.getItem('ctx_benchmark_done');
+      if (authState === 'APP' && !benchmarkDone && !showBenchmark) {
+          setShowBenchmark(true);
+      }
 
       if (isGuest) {
           localStorage.setItem('ctx_user', JSON.stringify(user));
@@ -313,7 +304,6 @@ export default function App() {
               newCompleted.push(ach.id);
               hasUpdates = true;
               
-              // Notification for achievement
               setNotifications(prev => [{
                   id: Date.now(),
                   type: 'success',
@@ -321,7 +311,6 @@ export default function App() {
                   message: `${ach.title}: ${ach.reward}`
               }, ...prev]);
 
-              // Check for model unlock
               if (ach.id === 'pro_user' && !newUnlockedModels.includes('pro')) {
                   newUnlockedModels.push('pro');
                   setNotifications(prev => [{
@@ -343,7 +332,6 @@ export default function App() {
   // --- HELPERS ---
   const loadLocalData = () => {
       const u = JSON.parse(localStorage.getItem('ctx_user') || '{}');
-      // Merge with defaults to ensure preferences exist
       const mergedUser = { 
           name: "", 
           semester: 1,
@@ -361,7 +349,6 @@ export default function App() {
       
       setUser(mergedUser); setCourses(c); setTasks(t); setNotes(n);
       
-      // Handle Start Tab preference
       if (mergedUser.preferences?.startTab) {
           setActiveTab(mergedUser.preferences.startTab);
       }
@@ -416,14 +403,23 @@ export default function App() {
       }
   };
 
+  // --- BENCHMARK COMPLETE HANDLER ---
+  const handleBenchmarkComplete = (newPrefs: Partial<UserPreferences>) => {
+      setUser(prev => ({
+          ...prev,
+          preferences: { ...prev.preferences, ...newPrefs }
+      }));
+      localStorage.setItem('ctx_benchmark_done', 'true');
+      setShowBenchmark(false);
+  };
+
   useEffect(() => {
-    const newNotifs: Notification[] = notifications.filter(n => n.type === 'success' || n.title === 'IA Mejorada'); // Keep success notifs for a while
+    const newNotifs: Notification[] = notifications.filter(n => n.type === 'success' || n.title === 'IA Mejorada');
     const pendingTasks = tasks.filter(t => !t.done);
     if (pendingTasks.length > 0) newNotifs.push({ id: 1, type: 'info', title: 'Cronos', message: `Tienes ${pendingTasks.length} tareas pendientes.` });
     const lowGrades = courses.filter(c => parseFloat(c.average) < user.minGrade && parseFloat(c.average) > 0);
     if (lowGrades.length > 0) newNotifs.push({ id: 2, type: 'alert', title: 'Alerta Académica', message: `${lowGrades.length} materias requieren atención inmediata.` });
     
-    // De-dupe by ID roughly
     const uniqueNotifs = Array.from(new Map(newNotifs.map(item => [item.id, item])).values());
     setNotifications(uniqueNotifs);
   }, [tasks, courses, user.minGrade]);
@@ -466,13 +462,11 @@ export default function App() {
 
   // --- NAVIGATION HANDLER ---
   const handleNavClick = (tab: AppTab) => {
-    // Haptic Feedback on Navigation
     triggerHaptic('light');
     setActiveTab(tab);
     if (window.innerWidth < 768) {
         setIsSidebarOpen(false);
     }
-    // Smooth scrolling to top when switching tabs
     if(mainContentRef.current) {
       mainContentRef.current.scrollTo({ top: 0, behavior: 'smooth' });
     }
@@ -481,34 +475,6 @@ export default function App() {
   const addCourse = (courseData: any) => {
     const newCourse: Course = { ...courseData, id: Date.now(), cuts: [], resources: [], average: '0.0', progress: 0, semester: courseData.semester || currentSemester, color: 'cortex' };
     setCourses(prev => [...prev, newCourse]);
-  };
-
-  const addGrade = (args: any) => {
-      const { course_name, cut_name, grade, activity_name, weight } = args;
-      let resultMsg = "";
-      setCourses(prev => {
-          const courseIndex = prev.findIndex(c => c.name.toLowerCase().includes(course_name.toLowerCase()));
-          if (courseIndex === -1) { resultMsg = `No encontré la materia '${course_name}'.`; return prev; }
-          const newCourses = [...prev];
-          const course = { ...newCourses[courseIndex] };
-          let cutIndex = course.cuts.findIndex(c => c.name.toLowerCase().includes(cut_name.toLowerCase()));
-          if (cutIndex === -1) {
-               course.cuts = [...course.cuts, { id: Date.now(), name: cut_name, weight: weight || 33.3, grade: '0.0', activities: [] }];
-               cutIndex = course.cuts.length - 1;
-          }
-          const cut = { ...course.cuts[cutIndex] };
-          if (activity_name) {
-              cut.activities = [...(cut.activities || []), { id: Date.now(), name: activity_name, weight: weight || 20, grade: String(grade) }];
-              resultMsg = `Agregada nota ${grade} a actividad '${activity_name}' en '${cut_name}' de '${course.name}'.`;
-          } else {
-              cut.grade = String(grade);
-              resultMsg = `Agregada nota ${grade} a '${cut_name}' en '${course.name}'.`;
-          }
-          course.cuts[cutIndex] = cut;
-          newCourses[courseIndex] = course;
-          return newCourses;
-      });
-      return resultMsg;
   };
 
   const updateCourse = (updated: Course) => setCourses(prev => prev.map(c => c.id === updated.id ? updated : c));
@@ -531,17 +497,13 @@ export default function App() {
 
   const handleAiSend = async (e: React.FormEvent) => {
     e.preventDefault();
-    // Allow send if connected OR if offline mode is active
     if((!aiInput.trim() && !chatImage) || isAiLoading) return;
     
-    triggerHaptic('light'); // Feedback on send
+    triggerHaptic('light'); 
 
-    // --- API KEY CHECK ---
-    const apiKey = getClientApiKey();
-
-    // In offline mode we proceed without a key check, or with a dummy one.
+    const apiKey = getApiKey();
     if (!apiKey && aiConnectionStatus !== 'offline_mode') {
-        setAiMessages(prev => [...prev, {role: 'bot', text: "❌ Error crítico: No se encuentra la API Key.", timestamp: Date.now()}]);
+        setAiMessages(prev => [...prev, {role: 'bot', text: "❌ Error de Configuración: No se encuentra API KEY.", timestamp: Date.now()}]);
         return;
     }
 
@@ -556,11 +518,11 @@ export default function App() {
     try {
         const responseText = await generateText(userText, undefined, user.selectedModel);
         setAiMessages(prev => [...prev, {role: 'bot', text: responseText, timestamp: Date.now()}]);
-        triggerHaptic('medium'); // Feedback on response received
+        triggerHaptic('medium'); 
     } catch (error) {
         console.error("AI Error:", error);
         setAiMessages(prev => [...prev, {role: 'bot', text: "Error de conexión.", timestamp: Date.now()}]);
-        triggerHaptic('heavy'); // Feedback on error
+        triggerHaptic('heavy');
     }
     setIsAiLoading(false);
   };
@@ -577,6 +539,11 @@ export default function App() {
   if (authState === 'LOGIN') return <AuthScreen onLogin={handleLogin} />;
   if (authState === 'ONBOARDING') return <OnboardingWizard onComplete={handleOnboarding} />;
 
+  // --- BENCHMARK OVERLAY ---
+  if (showBenchmark) {
+      return <SystemOptimizer onComplete={handleBenchmarkComplete} />;
+  }
+
   const currentPrefs = user.preferences || DEFAULT_PREFS;
   const sidebarPos = currentPrefs.sidebarPosition || 'left';
 
@@ -584,17 +551,19 @@ export default function App() {
     <div className={`h-screen w-full flex bg-[var(--bg-main)] text-[var(--text-primary)] overflow-hidden font-sans selection:bg-[var(--accent)] selection:text-white relative ${sidebarPos === 'right' ? 'flex-row-reverse' : 'flex-row'}`}>
       {currentPrefs.enableTexture && <div className="bg-noise"></div>}
       
+      {/* BACKGROUND OPTIMIZED: Reduced size, fewer elements, and GPU accelerated animations */}
       <div className="absolute inset-0 pointer-events-none overflow-hidden z-0">
         <div 
-            className="absolute top-[-20%] left-[-10%] w-[80vw] h-[80vw] bg-[var(--accent)] rounded-full blur-[90px] opacity-[0.25] anim-nebula-1 mix-blend-multiply dark:mix-blend-screen transition-opacity duration-1000" 
+            className="absolute top-[-10%] left-[-10%] w-[50vw] h-[50vw] bg-[var(--accent)] rounded-full blur-[60px] opacity-[0.2] anim-nebula-1 mix-blend-multiply dark:mix-blend-screen transition-opacity duration-1000" 
             style={{ opacity: currentPrefs.nebulaIntensity, '--target-opacity': currentPrefs.nebulaIntensity } as any}
         />
         <div 
-            className="absolute bottom-[-20%] right-[-10%] w-[70vw] h-[70vw] bg-[var(--royal)] rounded-full blur-[100px] opacity-[0.25] anim-nebula-2 mix-blend-multiply dark:mix-blend-screen transition-opacity duration-1000"
+            className="absolute bottom-[-10%] right-[-10%] w-[45vw] h-[45vw] bg-[var(--royal)] rounded-full blur-[70px] opacity-[0.2] anim-nebula-2 mix-blend-multiply dark:mix-blend-screen transition-opacity duration-1000"
             style={{ opacity: currentPrefs.nebulaIntensity, '--target-opacity': currentPrefs.nebulaIntensity } as any}
         />
+        {/* Hidden on mobile to save GPU cycles */}
         <div 
-            className="absolute top-[40%] left-[30%] w-[50vw] h-[50vw] bg-[var(--danger)] rounded-full blur-[120px] opacity-[0.2] anim-nebula-3 mix-blend-multiply dark:mix-blend-screen transition-opacity duration-1000"
+            className="hidden md:block absolute top-[30%] left-[30%] w-[30vw] h-[30vw] bg-[var(--danger)] rounded-full blur-[80px] opacity-[0.15] anim-nebula-3 mix-blend-multiply dark:mix-blend-screen transition-opacity duration-1000"
             style={{ opacity: currentPrefs.nebulaIntensity * 0.8, '--target-opacity': currentPrefs.nebulaIntensity * 0.8 } as any}
         />
       </div>
@@ -725,15 +694,11 @@ export default function App() {
             {activeTab === 'cronos' && <CronosModule tasks={tasks} setTasks={setTasks} />}
             {activeTab === 'oracle' && <OracleModule courses={courses} gradingSystem={{max: user.maxGrade, min: user.minGrade}} userModel={user.selectedModel} />}
             {activeTab === 'nexus' && <NexusModule user={user} />}
-            {activeTab === 'settings' && <SettingsModule user={user} setUser={setUser} onImport={handleImportData} exportData={handleExportData} onAddTasks={(newTasks) => setTasks(prev => [...prev, ...newTasks])} />}
+            {activeTab === 'settings' && <SettingsModule user={user} setUser={setUser} onImport={handleImportData} exportData={handleExportData} onAddTasks={(newTasks) => setTasks(prev => [...prev, ...newTasks])} onRunBenchmark={() => setShowBenchmark(true)} />}
         </div>
       </main>
 
       {/* AI PANEL & MODALS */}
-      {/* 
-          MOBILE TRANSITION: Translate-Y from Bottom
-          DESKTOP TRANSITION: Translate-X from Right
-      */}
       <div 
         className={`fixed inset-0 md:inset-y-0 md:right-0 md:left-auto z-[60] w-full md:w-[400px] bg-[var(--bg-card)] border-l border-[var(--border-color)] shadow-2xl transform transition-transform duration-300 cubic-bezier(0.16, 1, 0.3, 1) flex flex-col backdrop-blur-xl 
         ${showAiPanel ? 'translate-y-0 md:translate-x-0' : 'translate-y-full md:translate-x-full md:translate-y-0'}`}

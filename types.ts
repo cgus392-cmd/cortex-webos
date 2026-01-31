@@ -10,6 +10,7 @@ export interface UserPreferences {
   interfaceRoundness: 'none' | 'modern' | 'full'; // 'none' = sharp, 'modern' = xl, 'full' = 2xl/3xl
   sidebarPosition: 'left' | 'right';
   lowPowerMode: boolean; // Disables heavy effects for mobile performance
+  compactMode: boolean; // NEW: Increases information density on mobile
 }
 
 export interface User {

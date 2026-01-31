@@ -1,24 +1,9 @@
 
 import React, { useState, useEffect, useRef } from 'react';
 import { School, Wand2, Loader2, Link2, Globe, Search, ChevronRight, GraduationCap, Sun, Moon, Check, ArrowRight, ChevronLeft, Lightbulb, Bot, CalendarPlus, Layers, Zap } from 'lucide-react';
-import { User, UniversityDBEntry, Task } from '../types';
+import { User, Task } from '../types';
 import { UniversityBrowser } from './UniversityBrowser';
-
-// CLOUD_DB simulated locally
-const CLOUD_DB: UniversityDBEntry[] = [
-  { k: ["nacional", "unal", "bogota"], name: "Universidad Nacional de Colombia", domain: "unal.edu.co" },
-  { k: ["andes", "uniandes"], name: "Universidad de los Andes", domain: "uniandes.edu.co" },
-  { k: ["javeriana", "puj"], name: "Pontificia Universidad Javeriana", domain: "javeriana.edu.co" },
-  { k: ["antioquia", "udea"], name: "Universidad de Antioquia", domain: "udea.edu.co" },
-  { k: ["norte", "uninorte"], name: "Universidad del Norte", domain: "uninorte.edu.co" },
-  { k: ["eafit"], name: "Universidad EAFIT", domain: "eafit.edu.co" },
-  { k: ["harvard"], name: "Harvard University", domain: "harvard.edu" },
-  { k: ["mit"], name: "MIT", domain: "mit.edu" },
-  { k: ["stanford"], name: "Stanford University", domain: "stanford.edu" },
-  { k: ["unam"], name: "Universidad Nacional Autónoma de México", domain: "unam.mx" },
-  { k: ["tec", "monterrey"], name: "Tecnológico de Monterrey", domain: "tec.mx" },
-  { k: ["uba", "buenos aires"], name: "Universidad de Buenos Aires", domain: "uba.ar" }
-];
+import { searchUniversityDatabase, UniversityMatch } from '../services/universityEngine';
 
 interface OnboardingProps {
   onComplete: (data: Partial<User>, extraTasks?: Task[]) => void;
@@ -41,7 +26,7 @@ export const OnboardingWizard: React.FC<OnboardingProps> = ({ onComplete }) => {
   const [inputValue, setInputValue] = useState('');
   const [isResolving, setIsResolving] = useState(false);
   const [showResults, setShowResults] = useState(false);
-  const [results, setResults] = useState<UniversityDBEntry[]>([]);
+  const [results, setResults] = useState<UniversityMatch[]>([]);
   
   // "Lite Browser" / AI Researcher State
   const [showBrowser, setShowBrowser] = useState(false);
@@ -58,38 +43,37 @@ export const OnboardingWizard: React.FC<OnboardingProps> = ({ onComplete }) => {
     setIsResolving(true);
     setShowResults(false);
     
+    // Simulate slight delay for feel
     setTimeout(() => {
-      const lowerInput = inputValue.toLowerCase().trim();
+      const matches = searchUniversityDatabase(inputValue);
       
-      if (lowerInput.includes('.') && !lowerInput.includes(' ')) {
-        const domain = lowerInput.replace(/^https?:\/\//, '').replace(/\/$/, '');
-        const logo = `https://www.google.com/s2/favicons?domain=${domain}&sz=128`;
-        setData({ ...data, university: domain, logoUrl: logo });
-        setIsResolving(false);
-        return;
-      }
-
-      const matches = CLOUD_DB.filter(u => 
-        u.name.toLowerCase().includes(lowerInput) || 
-        u.k.some(key => lowerInput.includes(key))
-      );
-
       if (matches.length > 0) {
-        setResults(matches);
-        setShowResults(true);
+          // If perfect match (e.g. direct domain entry), select immediately if only 1
+          if (matches.length === 1 && matches[0].country === 'Web') {
+              handleSelectUniversity(matches[0]);
+          } else {
+              setResults(matches);
+              setShowResults(true);
+          }
       } else {
-        const guessDomain = lowerInput.replace(/\s+/g, '') + '.edu.co';
-        setResults([{ k: [], name: inputValue + " (Probable)", domain: guessDomain, isGuess: true }]);
-        setShowResults(true);
+          // No results, create a fallback
+          const guessDomain = `${inputValue.replace(/\s+/g, '')}.edu`;
+          setResults([{ 
+              name: inputValue, 
+              domain: guessDomain, 
+              country: "Desconocido", 
+              logo: `https://ui-avatars.com/api/?name=${inputValue}&background=random`
+          }]);
+          setShowResults(true);
       }
       setIsResolving(false);
-    }, 600);
+    }, 400);
   };
 
-  const handleSelectUniversity = (uni: UniversityDBEntry) => {
-    const logo = `https://www.google.com/s2/favicons?domain=${uni.domain}&sz=128`;
-    const cleanName = uni.name.replace(' (Probable)', '');
-    setData({ ...data, university: cleanName, logoUrl: logo });
+  const handleSelectUniversity = (uni: UniversityMatch) => {
+    // Remove (Probable) or extra text for clean name
+    const cleanName = uni.name.replace(' (Probable)', '').replace(' (Búsqueda Web)', '');
+    setData({ ...data, university: cleanName, logoUrl: uni.logo });
     setInputValue(cleanName);
     setShowResults(false);
   };
@@ -141,7 +125,7 @@ export const OnboardingWizard: React.FC<OnboardingProps> = ({ onComplete }) => {
                         if (e.target.value === '') setShowResults(false);
                       }}
                       onKeyDown={(e) => e.key === 'Enter' && handleMagicSearch()}
-                      placeholder="Nombre (ej: Nacional) o URL" 
+                      placeholder="Nombre (ej: Nacional, Andes) o URL" 
                       className="w-full input-glass pl-12 pr-12 text-lg font-medium"
                       autoFocus
                     />
@@ -158,8 +142,8 @@ export const OnboardingWizard: React.FC<OnboardingProps> = ({ onComplete }) => {
                     <div className="absolute top-full left-0 right-0 mt-2 bg-[var(--bg-card)] border border-[var(--border-color)] rounded-xl max-h-60 overflow-y-auto z-50 backdrop-blur-xl shadow-2xl">
                       {results.map((uni, idx) => (
                         <div key={idx} onClick={() => handleSelectUniversity(uni)} className="p-3 cursor-pointer hover:bg-[var(--bg-input)] flex items-center gap-3 border-b border-[var(--border-color)] last:border-0 group transition-colors">
-                          <div className="p-2 rounded-lg bg-[var(--bg-main)] text-[var(--text-secondary)] group-hover:text-[var(--accent)]">
-                            {uni.isGuess ? <Lightbulb size={16} /> : <Globe size={16} />}
+                          <div className="w-8 h-8 rounded-lg bg-white border border-[var(--border-color)] p-1 flex items-center justify-center shrink-0">
+                             <img src={uni.logo} className="w-full h-full object-contain" alt="" />
                           </div>
                           <div className="flex-1 overflow-hidden">
                             <p className="font-bold text-sm text-[var(--text-primary)] truncate">{uni.name}</p>

@@ -1,12 +1,6 @@
 
 import { GoogleGenAI } from "@google/genai";
 
-// --- CORTEX AI CONFIGURATION ---
-
-// ⚠️ HARDCODED KEY: Solución definitiva para asegurar conexión en Vercel.
-// Esta es la clave "AIzaSyDi..." que configuraste y sabemos que es la correcta.
-const API_KEY = "AIzaSyDiSXYLe-zqKCqtfUSPAZJ9qOzTkK8JsCk";
-
 // --- MAPA DE MODELOS (GEMINI 3.0) ---
 const MODELS = {
     standard: 'gemini-3-flash-preview',      
@@ -16,9 +10,11 @@ const MODELS = {
 // --- PUBLIC EXPORTS ---
 
 export const checkAiConnection = async (): Promise<'connected' | 'offline'> => {
-    if (!API_KEY) return 'offline';
+    // Validación estricta: Si no hay key, estamos offline.
+    if (!process.env.API_KEY || process.env.API_KEY.includes("REPLACE")) return 'offline';
+    
     try {
-        const ai = new GoogleGenAI({ apiKey: API_KEY });
+        const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
         // Ping rápido (1 token)
         await ai.models.generateContent({
             model: MODELS.standard,
@@ -28,8 +24,7 @@ export const checkAiConnection = async (): Promise<'connected' | 'offline'> => {
         return 'connected';
     } catch (error) {
         console.error("❌ Cortex Connection Check Failed:", error);
-        // Si falla, asumimos conectado pero con error de cuota/modelo, para no bloquear la UI
-        return 'connected'; 
+        return 'connected'; // Asumimos conectado si hay error de modelo pero la key existe
     }
 };
 
@@ -38,10 +33,10 @@ export const generateText = async (
     systemInstruction?: string,
     modelType: 'flash' | 'pro' = 'flash'
 ): Promise<string> => {
-    if (!API_KEY) return getMockResponse(prompt);
+    if (!process.env.API_KEY) return getMockResponse(prompt);
 
     try {
-        const ai = new GoogleGenAI({ apiKey: API_KEY });
+        const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
         const targetModel = modelType === 'pro' ? MODELS.premium : MODELS.standard;
 
         const result = await ai.models.generateContent({
@@ -57,7 +52,7 @@ export const generateText = async (
 
     } catch (error) {
         console.error("AI Generation Error:", error);
-        return "Hubo un error conectando con Gemini. Intenta de nuevo en unos segundos.";
+        return "Hubo un error conectando con Gemini. Verifica tu conexión o intenta más tarde.";
     }
 };
 
@@ -67,10 +62,10 @@ export const interactWithDocument = async (
     userQuery: string,
     modelType: 'flash' | 'pro' = 'flash'
 ): Promise<string> => {
-    if (!API_KEY) return "Modo Offline: Configura la API Key para usar esta función.";
+    if (!process.env.API_KEY) return "Modo Offline: Configura la API Key para usar esta función.";
 
     try {
-        const ai = new GoogleGenAI({ apiKey: API_KEY });
+        const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
         const targetModel = modelType === 'pro' ? MODELS.premium : MODELS.standard;
         const instruction = `Eres NEXUS. Responde basándote ÚNICAMENTE en este contexto:\n---\n${docContent.substring(0, 30000)}\n---`;
 
@@ -127,9 +122,44 @@ export const researchUniversity = async (university: string, query: string): Pro
     return { text: cleanText, foundDates };
 };
 
+// --- FUNCIÓN DE BÚSQUEDA REAL DE DOMINIOS (INTELIGENTE) ---
+export const findUniversityDomainAI = async (query: string): Promise<{name: string, domain: string}[]> => {
+    if (!process.env.API_KEY) return [];
+
+    const prompt = `
+    El usuario busca la universidad: "${query}".
+    Tu tarea: Identificar el dominio web OFICIAL real (ej: unal.edu.co, harvard.edu).
+    
+    Devuelve SOLO un JSON array con las 3 coincidencias más probables.
+    Formato: [{"n": "Nombre Exacto", "d": "dominio.edu.co"}]
+    
+    NO inventes dominios. Si no estás seguro, busca variantes reales.
+    NO uses markdown. Solo el JSON raw.
+    `;
+
+    try {
+        const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+        const result = await ai.models.generateContent({
+            model: MODELS.standard,
+            contents: prompt,
+            config: { temperature: 0 } // Determinista para precisión
+        });
+
+        const text = result.text || "";
+        // Limpiar JSON si viene con markdown
+        const jsonStr = text.replace(/```json/g, '').replace(/```/g, '').trim();
+        const parsed = JSON.parse(jsonStr);
+        
+        return parsed.map((p: any) => ({ name: p.n, domain: p.d }));
+    } catch (e) {
+        console.error("University AI Lookup Failed", e);
+        return [];
+    }
+};
+
 // --- RESPUESTAS DE EMERGENCIA (MOCK) ---
 const MOCK_RESPONSES: Record<string, string> = {
-    'default': "## Sistema Offline 🛡️\n\nNo se detectó una API Key válida. Por favor configura VITE_API_KEY en Vercel.",
+    'default': "## Sistema Offline 🛡️\n\nNo se detectó una API Key válida en Vercel. Por favor configura la variable `VITE_API_KEY`.",
     'strategy': "## Estrategia Offline\n\n1. Enfócate en los trabajos de mayor peso.\n2. Habla con el profesor.\n3. No faltes a clases.",
     'university': "Modo Offline: Consulta la página oficial de la universidad."
 };
@@ -138,3 +168,6 @@ const getMockResponse = (prompt: string): string => {
     if (prompt.includes('Investiga')) return MOCK_RESPONSES.university;
     return MOCK_RESPONSES.default;
 };
+export const getApiKey = (): string | undefined => {
+    return process.env.API_KEY;
+}
